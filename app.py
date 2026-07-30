@@ -19,7 +19,6 @@ def normalize_text(text):
   )
 
 def process_allocation(input_file):
-  # Mion ve MİON, Migros koduna (40000133) yönlendiriliyor
   customer_mapping = {
       'AFILI': '40000719',
       'AFILI KOZMETIK': '40000719',
@@ -36,8 +35,8 @@ def process_allocation(input_file):
       'TRADITIONAL TRADE': '40000004',
       'LOCAL PERFUMERY': '40000572',
       'MIGROS': '40000133',
-      'MION': '40000133',  # Mion -> Migros koduna dahil
-      'MİON': '40000133',  # Mion (Türkçe karakter) -> Migros koduna dahil
+      'MION': '40000133',
+      'MİON': '40000133',
       'ROSSMANN': '40000148',
       'RKA': '40000594',
       'SOK': '40000135',
@@ -87,11 +86,42 @@ def process_allocation(input_file):
 
   for barcode in unique_barcodes:
     prod_df = df[df[barcode_col] == barcode]
+
     is_promo_only = prod_df['yorum_clean'].str.contains(
         'promo only|sadece promosyon', na=False
     ).any()
+    is_migros_exc = prod_df['yorum_clean'].str.contains('migros exc|exc', na=False).any()
 
-    if is_promo_only:
+    if is_migros_exc:
+      # Migros EXC kuralı: O müşteri quotasız adet alır, diğerleri quotalı 0 alır
+      for _, row in prod_df.iterrows():
+        processed_rows.append({
+            'Customer_Name': row[bar_customer_col],
+            'Barcode': row[barcode_col],
+            'Qty': row[qty_col],
+            'Comment': 'migros exc',  # quotasız işaretçisi
+        })
+
+      existing_customers = prod_df[bar_customer_col].apply(
+          lambda x: normalize_text(x)
+      ).tolist()
+
+      for cust_name in customer_mapping.keys():
+        if cust_name in ['MION', 'MİON']:
+          continue
+        found = any(
+            normalize_text(cust_name) == normalize_text(ec)
+            for ec in existing_customers
+        )
+        if not found:
+          processed_rows.append({
+              'Customer_Name': cust_name,
+              'Barcode': barcode,
+              'Qty': 0,
+              'Comment': 'promo only',  # quotalı 0 işaretçisi
+          })
+
+    elif is_promo_only:
       existing_customers = prod_df[bar_customer_col].apply(
           lambda x: normalize_text(x)
       ).tolist()
@@ -105,7 +135,6 @@ def process_allocation(input_file):
         })
 
       for cust_name in customer_mapping.keys():
-        # Mion/Migros tekil sayılması için kontrol
         if cust_name in ['MION', 'MİON']:
           continue
         found = any(
@@ -130,12 +159,11 @@ def process_allocation(input_file):
 
   final_df = pd.DataFrame(processed_rows)
 
-  # Müşteri isimlerini SAP koduna çevir
   final_df['Customer_Code'] = final_df['Customer_Name'].apply(
       lambda x: customer_mapping.get(normalize_text(x), str(x))
   )
 
-  # Aynı ürün ve aynı müşteri kodu için gelen adetleri (Örn: Migros + Mion) topla (sum)
+  # Aynı ürün ve müşteri için adetleri topla
   final_df = (
       final_df.groupby(['Barcode', 'Customer_Code', 'Comment'], as_index=False)
       ['Qty']
@@ -161,14 +189,16 @@ def process_allocation(input_file):
   output_df['Qty reserved'] = final_df['Qty']
   output_df['Unit of measure'] = 'UN'
 
-  output_df['X'] = final_df['Comment'].apply(
-      lambda y: (
-          'X'
-          if 'promo only' in str(y).lower()
-          or 'promosyon' in str(y).lower()
-          else ''
-      )
-  )
+  # X Sütunu Kuralı: Migros EXC olanlar quotasız (boş), Promo Only olanlar quotalı ('X')
+  def determine_x(comment):
+    c = str(comment).lower()
+    if 'migros exc' in c or 'exc' in c:
+      return ''
+    elif 'promo only' in c or 'promosyon' in c:
+      return 'X'
+    return ''
+
+  output_df['X'] = final_df['Comment'].apply(determine_x)
 
   return output_df
 
