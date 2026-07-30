@@ -42,53 +42,47 @@ def process_allocation(input_file):
 
   df = pd.read_excel(input_file)
   df.columns = df.columns.astype(str).str.strip()
+  col_norm = {normalize_text(c): c for c in df.columns}
 
-  # Yorum sütununu bul ve temizle
-  yorum_col = None
+  # Kritik sütunları bul
+  bar_customer_col = col_norm.get('BARCUSTOMER')
+  barcode_col = col_norm.get('BARCODE')
+  yorum_col = col_norm.get('YORUM') or col_norm.get('COMMENT')
+
+  # Adet sütununu bul (Barcode, BarCustomer ve Yorum haricindeki ilk sayısal veya tarih sütunu)
+  qty_col = None
   for c in df.columns:
-    if 'yorum' in normalize_text(c) or 'comment' in normalize_text(c):
-      yorum_col = c
+    norm_c = normalize_text(c)
+    if norm_c not in [
+        'BARCUSTOMER',
+        'BARCODE',
+        'DESC',
+        'PFL',
+        'BRAND',
+        'YORUM',
+        'COMMENT',
+    ]:
+      qty_col = c
       break
 
+  if not bar_customer_col or not barcode_col or not qty_col:
+    st.error(
+        '⚠ Dosyada BarCustomer, Barcode veya miktar sütunu bulunamadı! Sütun'
+        ' adlarını kontrol edin.'
+    )
+    return pd.DataFrame()
+
+  # 1. Yorum filtresi ("alokasyonda" olanları çıkar)
   if yorum_col:
     df['yorum_clean'] = df[yorum_col].astype(str).str.strip().str.lower()
     df = df[~df['yorum_clean'].str.contains('alokasyonda|allocation', na=False)]
-
-    mask_promo = df['yorum_clean'].str.contains(
-        'promo only|sadece promosyon', na=False
-    )
-    for cust_key in customer_mapping.keys():
-      for c in df.columns:
-        if normalize_text(c) == cust_key:
-          df.loc[mask_promo & df[c].isna(), c] = 0
-
     df = df.drop(columns=['yorum_clean'])
 
-  # Müşteri ve Barkod sütunlarını belirle
-  existing_customers = [
-      c for c in df.columns if normalize_text(c) in customer_mapping
-  ]
-  barcode_col = next(
-      (c for c in df.columns if normalize_text(c) == 'BARCODE'), None
-  )
+  # Boş veya 0 adetleri ele
+  df = df[df[qty_col].notna()]
+  df = df[df[qty_col] != 0]
 
-  if not existing_customers or not barcode_col:
-    st.error('⚠ Dosyada Barcode veya müşteri sütunları bulunamadı!')
-    return pd.DataFrame()
-
-  # Unpivot işlemi
-  df_melted = df.melt(
-      id_vars=[barcode_col],
-      value_vars=existing_customers,
-      var_name='Customer_Name',
-      value_name='Qty_reserved',
-  )
-
-  # Adeti boş olan veya 0 olan satırları ele
-  df_melted = df_melted[df_melted['Qty_reserved'].notna()]
-  df_melted = df_melted[df_melted['Qty_reserved'] != 0]
-
-  # Tarih hesaplamaları (Bugün ve Ayın Son Günü)
+  # Tarih hesaplamaları
   today = datetime.today()
   valid_from = today.strftime('%d.%m.%Y')
   last_day = calendar.monthrange(today.year, today.month)[1]
@@ -101,13 +95,16 @@ def process_allocation(input_file):
   output_df['Division'] = ''
   output_df['Plant'] = 'ZTR1'
   output_df['Storage Location'] = 'TL01'
-  output_df['Customer'] = df_melted['Customer_Name'].apply(
-      lambda x: customer_mapping.get(normalize_text(x), '')
+
+  # Müşteri kodunu mapping'den al
+  output_df['Customer'] = df[bar_customer_col].apply(
+      lambda x: customer_mapping.get(normalize_text(x), str(x))
   )
-  output_df['Material Number'] = df_melted[barcode_col]
+
+  output_df['Material Number'] = df[barcode_col]
   output_df['Valid-From Date'] = valid_from
   output_df['Valid-To Date'] = valid_to
-  output_df['Qty reserved'] = df_melted['Qty_reserved']
+  output_df['Qty reserved'] = df[qty_col]
   output_df['Unit of measure'] = 'UN'
   output_df['X'] = 'X'
 
