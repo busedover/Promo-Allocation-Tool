@@ -44,12 +44,11 @@ def process_allocation(input_file):
   df.columns = df.columns.astype(str).str.strip()
   col_norm = {normalize_text(c): c for c in df.columns}
 
-  # Kritik sütunları bul
   bar_customer_col = col_norm.get('BARCUSTOMER')
   barcode_col = col_norm.get('BARCODE')
+  desc_col = col_norm.get('DESC')
   yorum_col = col_norm.get('YORUM') or col_norm.get('COMMENT')
 
-  # Adet sütununu bul (Barcode, BarCustomer ve Yorum haricindeki ilk sayısal veya tarih sütunu)
   qty_col = None
   for c in df.columns:
     norm_c = normalize_text(c)
@@ -67,28 +66,79 @@ def process_allocation(input_file):
 
   if not bar_customer_col or not barcode_col or not qty_col:
     st.error(
-        '⚠ Dosyada BarCustomer, Barcode veya miktar sütunu bulunamadı! Sütun'
-        ' adlarını kontrol edin.'
+        '⚠ Dosyada BarCustomer, Barcode veya miktar sütunu bulunamadı!'
     )
     return pd.DataFrame()
 
-  # 1. Yorum filtresi ("alokasyonda" olanları çıkar)
+  # Yorum temizliği ve alokasyonda olanları çıkarma
   if yorum_col:
-    df['yorum_clean'] = df[yorum_col].astype(str).str.strip().str.lower()
+    df['yorum_raw'] = df[yorum_col].astype(str)
+    df['yorum_clean'] = df['yorum_raw'].str.strip().str.lower()
     df = df[~df['yorum_clean'].str.contains('alokasyonda|allocation', na=False)]
-    df = df.drop(columns=['yorum_clean'])
+  else:
+    df['yorum_raw'] = ''
+    df['yorum_clean'] = ''
 
-  # Boş veya 0 adetleri ele
-  df = df[df[qty_col].notna()]
-  df = df[df[qty_col] != 0]
+  # 1. Normal satırlar (Mevcut veriler)
+  processed_rows = []
 
-  # Tarih hesaplamaları
+  # Ürün bazlı gruplama yaparak "promo only" olanları tüm müşterilere yayacağız
+  # Benzersiz ürünler (Barcode üzerinden)
+  unique_barcodes = df[barcode_col].unique()
+
+  for barcode in unique_barcodes:
+    prod_df = df[df[barcode_col] == barcode]
+    # Bu ürün için yorum "promo only" içeriyor mu?
+    is_promo_only = prod_df['yorum_clean'].str.contains(
+        'promo only|sadece promosyon', na=False
+    ).any()
+
+    if is_promo_only:
+      # Tüm müşteri listesini dön, dosyada olmayanlara 0 adet ver
+      existing_customers = prod_df[bar_customer_col].apply(
+          lambda x: normalize_text(x)
+      ).tolist()
+
+      # Var olanları ekle
+      for _, row in prod_df.iterrows():
+        processed_rows.append({
+            'Customer_Name': row[bar_customer_col],
+            'Barcode': row[barcode_col],
+            'Qty': row[qty_col],
+            'Comment': row['yorum_clean'],
+        })
+
+      # Eksik müşteriler için 0 adetle satır ekle
+      for cust_name in customer_mapping.keys():
+        # Müşterinin normalize hali listede var mı kontrol et
+        found = any(
+            normalize_text(cust_name) == normalize_text(ec)
+            for ec in existing_customers
+        )
+        if not found:
+          processed_rows.append({
+              'Customer_Name': cust_name,
+              'Barcode': barcode,
+              'Qty': 0,
+              'Comment': 'promo only',
+          })
+    else:
+      # Kofre veya boş yorumlu olanlar sadece dosyadaki haliyle kalır
+      for _, row in prod_df.iterrows():
+        processed_rows.append({
+            'Customer_Name': row[bar_customer_col],
+            'Barcode': row[barcode_col],
+            'Qty': row[qty_col],
+            'Comment': row['yorum_clean'],
+        })
+
+  final_df = pd.DataFrame(processed_rows)
+
   today = datetime.today()
   valid_from = today.strftime('%d.%m.%Y')
   last_day = calendar.monthrange(today.year, today.month)[1]
   valid_to = datetime(today.year, today.month, last_day).strftime('%d.%m.%Y')
 
-  # Çıktı formatını oluştur
   output_df = pd.DataFrame()
   output_df['Sales Organization'] = ''
   output_df['Distribution Channel'] = ''
@@ -96,17 +146,25 @@ def process_allocation(input_file):
   output_df['Plant'] = 'ZTR1'
   output_df['Storage Location'] = 'TL01'
 
-  # Müşteri kodunu mapping'den al
-  output_df['Customer'] = df[bar_customer_col].apply(
+  output_df['Customer'] = final_df['Customer_Name'].apply(
       lambda x: customer_mapping.get(normalize_text(x), str(x))
   )
 
-  output_df['Material Number'] = df[barcode_col]
+  output_df['Material Number'] = final_df['Barcode'].astype(str)
   output_df['Valid-From Date'] = valid_from
   output_df['Valid-To Date'] = valid_to
-  output_df['Qty reserved'] = df[qty_col]
+  output_df['Qty reserved'] = final_df['Qty']
   output_df['Unit of measure'] = 'UN'
-  output_df['X'] = 'X'
+
+  # X Sütunu Kuralı: Promo only olanlarda 'X', diğerlerinde boş
+  output_df['X'] = final_df['Comment'].apply(
+      lambda y: (
+          'X'
+          if 'promo only' in str(y).lower()
+          or 'promosyon' in str(y).lower()
+          else ''
+      )
+  )
 
   return output_df
 
