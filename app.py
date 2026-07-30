@@ -19,8 +19,10 @@ def normalize_text(text):
   )
 
 def process_allocation(input_file):
+  # Mion ve MİON, Migros koduna (40000133) yönlendiriliyor
   customer_mapping = {
       'AFILI': '40000719',
+      'AFILI KOZMETIK': '40000719',
       'AMAZON': '40000809',
       'A101': '40000143',
       'BIM': '40000142',
@@ -31,8 +33,11 @@ def process_allocation(input_file):
       'FILE': '40000566',
       'GRATIS': '40000146',
       'DISTRIBUTOR': '40000004',
+      'TRADITIONAL TRADE': '40000004',
       'LOCAL PERFUMERY': '40000572',
       'MIGROS': '40000133',
+      'MION': '40000133',  # Mion -> Migros koduna dahil
+      'MİON': '40000133',  # Mion (Türkçe karakter) -> Migros koduna dahil
       'ROSSMANN': '40000148',
       'RKA': '40000594',
       'SOK': '40000135',
@@ -46,7 +51,6 @@ def process_allocation(input_file):
 
   bar_customer_col = col_norm.get('BARCUSTOMER')
   barcode_col = col_norm.get('BARCODE')
-  desc_col = col_norm.get('DESC')
   yorum_col = col_norm.get('YORUM') or col_norm.get('COMMENT')
 
   qty_col = None
@@ -70,7 +74,6 @@ def process_allocation(input_file):
     )
     return pd.DataFrame()
 
-  # Yorum temizliği ve alokasyonda olanları çıkarma
   if yorum_col:
     df['yorum_raw'] = df[yorum_col].astype(str)
     df['yorum_clean'] = df['yorum_raw'].str.strip().str.lower()
@@ -79,27 +82,20 @@ def process_allocation(input_file):
     df['yorum_raw'] = ''
     df['yorum_clean'] = ''
 
-  # 1. Normal satırlar (Mevcut veriler)
   processed_rows = []
-
-  # Ürün bazlı gruplama yaparak "promo only" olanları tüm müşterilere yayacağız
-  # Benzersiz ürünler (Barcode üzerinden)
   unique_barcodes = df[barcode_col].unique()
 
   for barcode in unique_barcodes:
     prod_df = df[df[barcode_col] == barcode]
-    # Bu ürün için yorum "promo only" içeriyor mu?
     is_promo_only = prod_df['yorum_clean'].str.contains(
         'promo only|sadece promosyon', na=False
     ).any()
 
     if is_promo_only:
-      # Tüm müşteri listesini dön, dosyada olmayanlara 0 adet ver
       existing_customers = prod_df[bar_customer_col].apply(
           lambda x: normalize_text(x)
       ).tolist()
 
-      # Var olanları ekle
       for _, row in prod_df.iterrows():
         processed_rows.append({
             'Customer_Name': row[bar_customer_col],
@@ -108,9 +104,10 @@ def process_allocation(input_file):
             'Comment': row['yorum_clean'],
         })
 
-      # Eksik müşteriler için 0 adetle satır ekle
       for cust_name in customer_mapping.keys():
-        # Müşterinin normalize hali listede var mı kontrol et
+        # Mion/Migros tekil sayılması için kontrol
+        if cust_name in ['MION', 'MİON']:
+          continue
         found = any(
             normalize_text(cust_name) == normalize_text(ec)
             for ec in existing_customers
@@ -123,7 +120,6 @@ def process_allocation(input_file):
               'Comment': 'promo only',
           })
     else:
-      # Kofre veya boş yorumlu olanlar sadece dosyadaki haliyle kalır
       for _, row in prod_df.iterrows():
         processed_rows.append({
             'Customer_Name': row[bar_customer_col],
@@ -133,6 +129,18 @@ def process_allocation(input_file):
         })
 
   final_df = pd.DataFrame(processed_rows)
+
+  # Müşteri isimlerini SAP koduna çevir
+  final_df['Customer_Code'] = final_df['Customer_Name'].apply(
+      lambda x: customer_mapping.get(normalize_text(x), str(x))
+  )
+
+  # Aynı ürün ve aynı müşteri kodu için gelen adetleri (Örn: Migros + Mion) topla (sum)
+  final_df = (
+      final_df.groupby(['Barcode', 'Customer_Code', 'Comment'], as_index=False)
+      ['Qty']
+      .sum()
+  )
 
   today = datetime.today()
   valid_from = today.strftime('%d.%m.%Y')
@@ -146,17 +154,13 @@ def process_allocation(input_file):
   output_df['Plant'] = 'ZTR1'
   output_df['Storage Location'] = 'TL01'
 
-  output_df['Customer'] = final_df['Customer_Name'].apply(
-      lambda x: customer_mapping.get(normalize_text(x), str(x))
-  )
-
+  output_df['Customer'] = final_df['Customer_Code']
   output_df['Material Number'] = final_df['Barcode'].astype(str)
   output_df['Valid-From Date'] = valid_from
   output_df['Valid-To Date'] = valid_to
   output_df['Qty reserved'] = final_df['Qty']
   output_df['Unit of measure'] = 'UN'
 
-  # X Sütunu Kuralı: Promo only olanlarda 'X', diğerlerinde boş
   output_df['X'] = final_df['Comment'].apply(
       lambda y: (
           'X'
