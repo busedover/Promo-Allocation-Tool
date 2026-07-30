@@ -1,4 +1,3 @@
-
 import pandas as pd
 
 def normalize_text(text):
@@ -117,4 +116,3 @@ def generate_promo_allocation_excel(
 if __name__ == '__main__':
   # Test için: generate_promo_allocation_excel("ham_veri.xlsx")
   pass
-
